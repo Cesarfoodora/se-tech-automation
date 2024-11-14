@@ -1,0 +1,11 @@
+Starship-Create_Order requirements
+
+requests
+twilio
+google-cloud-bigquery
+google-auth
+oauth2client
+db-dtypes
+google-auth-oauthlib
+google-auth-httplib2
+pandas
