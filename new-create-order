@@ -1,0 +1,212 @@
+import json
+import os
+import requests
+from flask import escape
+from twilio.rest import Client  # Import the Twilio library
+from google.cloud import bigquery
+from google.oauth2 import service_account
+import pandas as pd  # Import pandas
+
+
+def get_bigquery_client():
+    try:
+        credential_path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "mikey.json"
+        )
+        credentials = service_account.Credentials.from_service_account_file(
+            credential_path, scopes=["https://www.googleapis.com/auth/cloud-platform"]
+        )
+        client = bigquery.Client(credentials=credentials, project=credentials.project_id)
+        return client
+    except Exception as e:
+        print(f"Error setting up BigQuery client: {e}")
+        raise
+
+
+def get_bigquery_data(client, order_id):
+    try:
+        query = "SELECT * FROM foodora-bi-se.bl_bd.robot_dmart_starship LIMIT 2"
+        query_job = client.query(query)  # API request
+        rows = query_job.result()  # Waits for query to finish
+
+        # Create a list of dictionaries from query result
+        data = [{"order_id": row.order_id, "latitude": row.latitude, "longitude": row.longitude, "order_value": row.order_value, "current_status": row.current_status, "name": row.name, "first_name": row.first_name, "phone": row.phone} for row in rows]
+        return data
+    except Exception as e:
+        print(f"Error retrieving data from BigQuery: {e}")
+        raise
+
+
+# Create the Twilio client once outside the function
+account_sid = os.environ.get("TWILIO_ACCOUNT_SID")
+auth_token = os.environ.get("TWILIO_AUTH_TOKEN")
+twilio_client = Client(account_sid, auth_token)   
+
+
+def starship_create_order_test(request):
+    """Cloud Run function triggered by Slack button."""
+    try:
+        request_json = request.get_json()
+        order_id = request_json['actions'][0]['value']
+        response_url = request_json['response_url']
+
+        # Fetch original blocks from request_json
+        original_blocks = request_json['message']['blocks']
+
+        # Get order details from BigQuery
+        client = get_bigquery_client()
+        order_data = get_bigquery_data(client, order_id)
+        order_data = order_data[0]
+
+        # 1. Availability API Call
+        availability_url = "https://api.starship.xyz/daas/v1/availability/list"
+        headers = {"Your-API-Key": os.environ.get('STARSHIP_API_KEY')}
+        availability_payload = {
+            "order_id": order_id,
+            "coordinates": {
+                "latitude": order_data['latitude'],
+                "longitude": order_data['longitude']
+            }
+        }
+        availability_response = requests.get(availability_url, headers=headers, json=availability_payload)
+        availability_response.raise_for_status()
+        availability_data = availability_response.json()
+
+        if availability_data[0]['status'] == "DELIVERABLE":
+            availability_id = availability_data[0]['id']
+
+            # Update Slack with availability status
+            updated_message = {
+                "blocks": original_blocks + [
+                    {
+                        "type": "section",
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": f"Availability check: Robot available!"
+                        }
+                    }
+                ]
+            }
+            requests.post(response_url, json=updated_message)
+
+            # 2. Create Delivery Job API Call
+            delivery_url = "https://api.starship.xyz/daas/v1.1/delivery"
+            delivery_payload = {
+                "availabilityId": availability_id,
+                "reference": order_id,
+                # ... (other required payload data) ...
+            }
+            delivery_response = requests.post(delivery_url, headers=headers, json=delivery_payload)
+            delivery_response.raise_for_status()
+            delivery_data = delivery_response.json()
+            tracker_short_link = delivery_data['trackerShortLink']
+
+            # Update Slack with delivery job status
+            updated_message = {
+                "blocks": original_blocks + [
+                    {
+                        "type": "section",
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": f"Delivery job created: {tracker_short_link}"
+                        }
+                    }
+                ]
+            }
+            requests.post(response_url, json=updated_message)
+
+            # 3. Send SMS using Twilio
+            try:
+                url = f"https://api.twilio.com/2010-04-01/Accounts/{account_sid}/Messages.json"
+                headers = {"Content-Type": "application/x-www-form-urlencoded"}   
+
+                data = {
+                    "Body": f"Hej {order_data['name']}, din order har just nu status ({order_data['current_status']}) \nHär kommer länken där du kan spåra din robotleverans för (order-ID: {order_data['order_id']}) {tracker_short_link} \nVärdet på din order blev totalt: ({order_data['order_value']})",
+                    "To": order_data['phone'],
+                    "From": "foodora",
+                }
+
+                response = requests.post(
+                    url, headers=headers, data=data, auth=(account_sid, auth_token)
+                )
+                response.raise_for_status()
+                print("SMS sent successfully!", response.json())
+
+                # Update Slack with SMS status
+                updated_message = {
+                    "blocks": original_blocks + [
+                        {
+                            "type": "section",
+                            "text": {
+                                "type": "mrkdwn",
+                                "text": "SMS sent to customer!"
+                            }
+                        }
+                    ]
+                }
+                requests.post(response_url, json=updated_message)
+
+            except requests.exceptions.RequestException as e:
+                # Update Slack with Twilio error message
+                updated_message = {
+                    "blocks": original_blocks + [
+                        {
+                            "type": "section",
+                            "text": {
+                                "type": "mrkdwn",
+                                "text": f"Error sending SMS: {e}"
+                            }
+                        }
+                    ]
+                }
+                requests.post(response_url, json=updated_message)
+                print(f"Error sending SMS: {e}")
+
+        else:
+            # Update Slack with "no robots available" message
+            updated_message = {
+                "blocks": original_blocks + [
+                    {
+                        "type": "section",
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": "No robots available for delivery."
+                        }
+                    }
+                ]
+            }
+            requests.post(response_url, json=updated_message)
+            print("No robots available for delivery.")
+
+    except requests.exceptions.RequestException as e:
+        # Update Slack with Starship API error message
+        updated_message = {
+            "blocks": original_blocks + [
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": f"Error processing Starship API request: {e}"
+                    }
+                }
+            ]
+        }
+        requests.post(response_url, json=updated_message)
+        print(f"Error processing Starship API request: {e}")
+    except Exception as e:
+        # Update Slack with general error message
+        updated_message = {
+            "blocks": original_blocks + [
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": f"An error occurred: {e}"
+                    }
+                }
+            ]
+        }
+        requests.post(response_url, json=updated_message)
+        print(f"An error occurred: {e}")
+
+    return "Order processing complete", 200
