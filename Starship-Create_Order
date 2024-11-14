@@ -1,0 +1,120 @@
+import json
+import os
+import requests
+from flask import escape
+from twilio.rest import Client  # Import the Twilio library
+from google.cloud import bigquery
+from google.oauth2 import service_account
+import pandas as pd  # Import pandas
+
+
+def token_access():
+    try:
+        url = 'https://api.starship.xyz/daas/v1/auth/token'
+        headers = {'Content-Type': 'application/json'}
+        payload = {
+            "grantType": "appCredentials",
+            "appId": "db9b2817-7c7f-4565-bee4-c75206d77a81",
+            "appSecret": "2jNBNhF_hQwA8BGOLOBPDa5S0bhuXPdshV3YwOvoM451GvzW1rZe1OsP60UZdINyAzbuB3c_eXRHy1sMx9GBqQ"
+        }
+        response = requests.post(url, headers=headers, json=payload)
+        response.raise_for_status()  # Raise an exception for bad status codes
+        token_data = response.json()
+        access_token = token_data['accessToken']  # Extract the access token
+        print(access_token)
+        return access_token
+    except requests.exceptions.RequestException as e:
+        print(f"Error fetching access token: {e}")
+        return None  # Or handle the error as needed
+
+def get_bigquery_client():
+    try:
+        credential_path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "mikey.json"
+        )
+        credentials = service_account.Credentials.from_service_account_file(
+            credential_path, scopes=["https://www.googleapis.com/auth/cloud-platform"]
+        )
+        client = bigquery.Client(credentials=credentials, project=credentials.project_id)
+        return client
+    except Exception as e:
+        print(f"Error setting up BigQuery client: {e}")
+        raise
+
+
+def get_bigquery_data(client):
+    try:
+        query = "SELECT * FROM foodora-bi-se.bl_bd.robot_dmart_starship LIMIT 2"
+        query_job = client.query(query)  # API request
+        rows = query_job.result()  # Waits for query to finish
+
+        # Create a list of dictionaries from query result
+        data = [{"order_id": row.order_id, "latitude": row.latitude, "longitude": row.longitude, "order_value": row.order_value, "current_status": row.current_status, "name": row.name, "first_name": row.first_name, "phone": row.phone} for row in rows]
+        return data
+    except Exception as e:
+        print(f"Error retrieving data from BigQuery: {e}")
+        raise
+
+
+def send_post_request(request):
+    # URLs for Starship APIs
+    availability_url = "https://cb90d81a-9ffd-4da5-ae71-13c5210a3a7e.mock.pstmn.io/starship/check_availability"
+    create_order_url = "https://cb90d81a-9ffd-4da5-ae71-13c5210a3a7e.mock.pstmn.io/starship/create_order"
+
+    # Your Twilio Account SID and Auth Token from environment variables
+    account_sid = os.environ.get("TWILIO_ACCOUNT_SID")
+    auth_token = os.environ.get("TWILIO_AUTH_TOKEN")
+
+    # Create a new Twilio client object
+    client = Client(account_sid, auth_token)
+
+    # Call access token
+    access_token = token_access()
+
+    # Get BigQuery data
+    bq_client = get_bigquery_client()
+    orders_data = get_bigquery_data(bq_client)
+
+    for order in orders_data:
+        # Payload to send
+        payload = {
+            "order_id": order['order_id'],
+            "timestamp": "2024-10-22T12:00:00Z",  # You can use any valid timestamp
+            "coordinates": {"latitude": order['latitude'], "longitude": order['longitude']},
+        }
+
+        try:
+            # Check availability
+            availability_response = requests.post(availability_url,json=payload)
+            availability_response.raise_for_status()
+            availability_data = availability_response.json()
+
+            # Check if availability is OK
+            if availability_data.get("AVAILABILITY") == "OK":
+                # Send the payload to create the order
+                create_order_response = requests.post(create_order_url, json=payload)
+                create_order_response.raise_for_status()
+                print(f"Order created successfully: {create_order_response.json()}")
+
+                # --- Send SMS using Twilio (only if order creation is successful) ---
+                url = f"https://api.twilio.com/2010-04-01/Accounts/{account_sid}/Messages.json"
+                headers = {"Content-Type": "application/x-www-form-urlencoded"}
+                data = {
+                    "Body": f"Hej {order['name']}, din order har just nu status ({order['current_status']}) \nHär kommer länken där du kan spåra din robotleverans för (order-ID: {order['order_id']}) https://d.starship.co/t/JmX \nVärdet på din order blev totalt: ({order['order_value']})",
+                    "To": order['phone'],  # Replace with the customer's phone number
+                    "From": "foodora",
+                }
+
+                response = requests.post(
+                    url, headers=headers, data=data, auth=(account_sid, auth_token)
+                )
+                response.raise_for_status()
+                print("SMS sent successfully!", response.json())
+
+            else:
+                print(f"Availability not OK for order {order['order_id']}:", availability_data)
+
+        except requests.exceptions.RequestException as e:
+            print(f"Error processing order {order['order_id']}: {e}")
+
+    return json.dumps({"status": "success"}), 200
