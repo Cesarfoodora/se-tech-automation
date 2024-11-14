@@ -40,7 +40,8 @@ def get_bigquery_data(client, order_id):
 # Create the Twilio client once outside the function
 account_sid = os.environ.get("TWILIO_ACCOUNT_SID")
 auth_token = os.environ.get("TWILIO_AUTH_TOKEN")
-twilio_client = Client(account_sid, auth_token)   
+twilio_client = Client(account_sid, auth_token)
+access_token = token_access()
 
 
 def starship_create_order_test(request):
@@ -60,16 +61,22 @@ def starship_create_order_test(request):
 
         # 1. Availability API Call
         availability_url = "https://api.starship.xyz/daas/v1/availability/list"
-        headers = {"Your-API-Key": os.environ.get('STARSHIP_API_KEY')}
+        headers = {
+            "Authorization": f"Bearer {access_token}",
+            "Content-Type": "application/json"
+        }
         availability_payload = {
-            "order_id": order_id,
-            "coordinates": {
-                "latitude": order_data['latitude'],
-                "longitude": order_data['longitude']
+            "loading": {
+                "id":"61c9b9bdd67a5a00094bb138"
+            }, 
+        "destination": {
+        "type": "COORDINATES",
+        "coordinates": {
+            "lat": order_data['latitude'],
+            "lng": order_data['longitude']
             }
         }
-        availability_response = requests.get(availability_url, headers=headers, json=availability_payload)
-        availability_response.raise_for_status()
+        availability_response = requests.post(availability_url, headers=headers, json=availability_payload)
         availability_data = availability_response.json()
 
         if availability_data[0]['status'] == "DELIVERABLE":
@@ -91,13 +98,15 @@ def starship_create_order_test(request):
 
             # 2. Create Delivery Job API Call
             delivery_url = "https://api.starship.xyz/daas/v1.1/delivery"
+            headers = {
+                "Authorization": f"Bearer {access_token}",
+                "Content-Type": "application/json"
+            }
             delivery_payload = {
                 "availabilityId": availability_id,
-                "reference": order_id,
-                # ... (other required payload data) ...
+                "reference": order_data['longitude']
             }
             delivery_response = requests.post(delivery_url, headers=headers, json=delivery_payload)
-            delivery_response.raise_for_status()
             delivery_data = delivery_response.json()
             tracker_short_link = delivery_data['trackerShortLink']
 
