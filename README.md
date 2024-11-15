@@ -30,15 +30,19 @@ value = order_data.get('value')
 
 where I want to filter out all orders that has string called "age_restricted" for the eligibilities field. 
 
-and also if "unit" = Liters then filter out all orders that has value =    
+and also:
+
+if "unit" = Liters and "value" > 40
+
+or if "unit" = CubicMeter and "value" > 0,04
+
+or if "unit" = CubicCentimeter and "value" > 40000
 
 
 
+then filter out these orders.    
 
 
-
-
-Also please add
 
 
 
