@@ -70,13 +70,13 @@ def format_slack_message(order_data):
                     {
                         "type": "mrkdwn",
                         "text": f"Order ID: *{order_data['order_id']}*\n"
-                               f"Customer ID: *{order_data.get(['customer_id']}*\n"
-                               f"Vendor Name: *{order_data.get['name']}*\n"
-                               f"Latitude: *{order_data.get['latitude']}*\n"
-                               f"Longitude: *{order_data.get['longitude']}*\n"
-                               f"Distance: *{order_data.get['pickup_to_dropoff_distance']}*\n"
-                               f"Phone Number: *{order_data.get['phone']}*\n"
-                               f"Created At: *{order_data.get['place_timestamp']}*"
+                               f"Customer ID: *{order_data['customer_id']}*\n"  # Changed to ['customer_id']
+                               f"Vendor Name: *{order_data['name']}*\n"  # Changed to ['name']
+                               f"Latitude: *{order_data['latitude']}*\n"  # Changed to ['latitude']
+                               f"Longitude: *{order_data['longitude']}*\n"  # Changed to ['longitude']
+                               f"Distance: *{order_data['pickup_to_dropoff_distance']}*\n"  # Changed to ['pickup_to_dropoff_distance']
+                               f"Phone Number: *{order_data['phone']}*\n"  # Changed to ['phone']
+                               f"Created At: *{order_data['place_timestamp']}*"  # Changed to ['place_timestamp']
                     }
                 ]
             },
@@ -121,45 +121,29 @@ def send_slack_message(webhook_url, message_body):
         response.raise_for_status()
         return response
     except requests.exceptions.RequestException as e:
-        print(f"Error   
- sending Slack message: {e}")
+        print(f"Error sending Slack message: {e}")
         raise
 
 
 def process_order(message_data):
     """Processes a single order from a Pub/Sub message."""
     try:
-        stream_source = message_data.get('attributes', {}).get('stream_source')
-        order_data = {}  # Initialize an empty dictionary
-
-        if stream_source == "stream_A":
-            # Extract stream A data (including new fields)
-            order_data = {
-                "order_id": message_data.get('content', {}).get('order_id'),
-                "latitude": message_data.get('content', {}).get('delivery', {}).get('location', {}).get('latitude'),
-                "longitude": message_data.get('content', {}).get('delivery', {}).get('location', {}).get('longitude'),
-                "name": message_data.get('content', {}).get('vendor', {}).get('name'),
-                "phone": message_data.get('content', {}).get('customer', {}).get('profile', {}).get('phone'),
-                "customer_id": message_data.get('content', {}).get('customer', {}).get('customer_id'),
-                "eligibilities": message_data.get('content', {}).get('eligibilities'),
-                "unit": message_data.get('content', {}).get('order', {}).get('order_volume', {}).get('unit'),
-                "value": message_data.get('content', {}).get('order', {}).get('order_volume', {}).get('value')
-            }
-
-        elif stream_source == "stream_B":
-            # Extract stream B data
-            order_data = {
-                "order_id": message_data.get('content', {}).get('order_id'),  # Assuming order_id exists in stream B as well
-                "pickup_to_dropoff_distance": message_data.get('content', {}).get('pickup_to_dropoff_distance')
-            }
-
-        else:
-            print(f"Unknown stream source: {stream_source}")
-            return  # Or handle the error appropriately
+        # Extract stream A data (including new fields)
+        order_data = {
+            "order_id": message_data.get('content', {}).get('order_id'),
+            "latitude": message_data.get('content', {}).get('delivery', {}).get('location', {}).get('latitude'),
+            "longitude": message_data.get('content', {}).get('delivery', {}).get('location', {}).get('longitude'),
+            "name": message_data.get('content', {}).get('vendor', {}).get('name'),
+            "phone": message_data.get('content', {}).get('customer', {}).get('profile', {}).get('phone'),
+            "customer_id": message_data.get('content', {}).get('customer', {}).get('customer_id'),
+            "eligibilities": message_data.get('content', {}).get('eligibilities'),
+            "unit": message_data.get('content', {}).get('order', {}).get('order_volume', {}).get('unit'),
+            "value": message_data.get('content', {}).get('order', {}).get('order_volume', {}).get('value')
+        }
 
         # --- FILTERING LOGIC --- 
         vendor_id = message_data.get('content', {}).get('vendor', {}).get('id')
-        distance = order_data.get('pickup_to_dropoff_distance')
+        distance = message_data.get('content', {}).get('pickup_to_dropoff_distance')  # Access distance directly
         eligibilities = order_data.get('eligibilities')
         unit = order_data.get('unit')
         value = order_data.get('value')
@@ -168,7 +152,7 @@ def process_order(message_data):
            ("age_restricted" in eligibilities) or \
            (unit == "Liters" and value > 40) or \
            (unit == "CubicMeter" and value > 0.04) or \
-           (unit == "CubicCentimeter" and value > 40000): 
+           (unit == "CubicCentimeter" and value > 40000):
             print(f"Ignoring message with vendor_id: {vendor_id}, distance: {distance}, eligibilities: {eligibilities}, unit: {unit}, value: {value}")
             return '', 204
 
@@ -183,14 +167,16 @@ def process_order(message_data):
             # Format the datetime
             formatted_timestamp = cet_dt.strftime('%Y-%m-%d %H:%M:%S %Z')
             order_data['place_timestamp'] = formatted_timestamp  # Add formatted timestamp to order_data
-        # --- END OF TIMESTAMP CONVERSION LOGIC ---
 
 
         # --- DUPLICATE CHECK AND SLACK NOTIFICATION LOGIC ---
         # Check if order has already been processed
         if check_order_exists(order_data["order_id"]):
             print(f"Order {order_data['order_id']} has already been processed")
-            return json
+            return json.dumps({
+                'status': 'skipped',
+                'message': f'Order {order_data["order_id"]} has already been processed'
+            }), 200
 
         # Format and send the Slack message
         message_body = format_slack_message(order_data)
