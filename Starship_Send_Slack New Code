@@ -70,13 +70,13 @@ def format_slack_message(order_data):
                     {
                         "type": "mrkdwn",
                         "text": f"Order ID: *{order_data['order_id']}*\n"
-                               f"Customer ID: *{order_data.get('customer_id', 'N/A')}*\n"
-                               f"Vendor Name: *{order_data.get('name', 'N/A')}*\n"
-                               f"Latitude: *{order_data.get('latitude', 'N/A')}*\n"
-                               f"Longitude: *{order_data.get('longitude', 'N/A')}*\n"
-                               f"Distance: *{order_data.get('pickup_to_dropoff_distance', 'N/A')}*\n"
-                               f"Phone Number: *{order_data.get('phone', 'N/A')}*\n"
-                               f"Created At: *{order_data.get('place_timestamp', 'N/A')}*"
+                               f"Customer ID: *{order_data.get(['customer_id']}*\n"
+                               f"Vendor Name: *{order_data.get['name']}*\n"
+                               f"Latitude: *{order_data.get['latitude']}*\n"
+                               f"Longitude: *{order_data.get['longitude']}*\n"
+                               f"Distance: *{order_data.get['pickup_to_dropoff_distance']}*\n"
+                               f"Phone Number: *{order_data.get['phone']}*\n"
+                               f"Created At: *{order_data.get['place_timestamp']}*"
                     }
                 ]
             },
