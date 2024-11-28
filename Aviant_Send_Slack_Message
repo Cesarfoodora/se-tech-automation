@@ -22,7 +22,7 @@ def check_order_exists(order_id):
     Check if an order has already been processed.
     Returns True if the order exists in the processed orders list.
     """
-    orders_ref = db.collection('starship').document('orders-sent-to-slack')
+    orders_ref = db.collection('aviant').document('aviant-orders-sent-to-slack')
     doc = orders_ref.get()
 
     if not doc.exists:
@@ -37,7 +37,7 @@ def add_order_to_firestore(order_id):
     """
     Add an order ID to the Firestore document.
     """
-    orders_ref = db.collection('starship').document('orders-sent-to-slack')
+    orders_ref = db.collection('aviant').document('aviant-orders-sent-to-slack')
 
     # Get the current document
     doc = orders_ref.get()
@@ -59,7 +59,7 @@ def format_slack_message(order_data):
                 "type": "header",
                 "text": {
                     "type": "plain_text",
-                    "text": ":robot_face: New Robot Delivery :robot_face:"
+                    "text": ":drone: New Drone Delivery :drone:"
                 }
             },
             {
@@ -67,13 +67,13 @@ def format_slack_message(order_data):
                 "fields": [
                     {
                         "type": "mrkdwn",
-                        "text": f"Order ID: *{order_data['order_id']}*\n"
-                               f"Customer ID: *{order_data['customer_id']}*\n"
-                               f"Vendor Name: *{order_data['name']}*\n"
-                               f"Latitude: *{order_data['latitude']}*\n"
-                               f"Longitude: *{order_data['longitude']}*\n"
+                        "text": f"External ID: *{order_data['order_id']}*\n"
+                               f"Street Address: *{order_data['address_text']}*\n"
+                               f"Postal Code: *{order_data['postal_code']}*\n"
                                f"Phone Number: *{order_data['phone']}*\n"
-                               f"Created At: *{order_data['place_timestamp']}*"
+                               f"Customer Name: *{order_data['name']}*\n"
+                               f"Pick Up Time: *{order_data['place_timestamp']}*\n" -- order placed timestamp + static value
+                               f"Promised Delivery Time: *{order_data['promised_customer_timestamp']}*"
                     }
                 ]
             },
@@ -179,12 +179,16 @@ def receive_orders(envelope):
         # Extract order data
         order_data = {
             "order_id": message_data.get('content', {}).get('order_id'),
-            "latitude": message_data.get('content', {}).get('delivery', {}).get('location', {}).get('latitude'),
-            "longitude": message_data.get('content', {}).get('delivery', {}).get('location', {}).get('longitude'),
+            "address_text": message_data.get('content', {}).get('delivery', {}).get('location', {}).get('address_text'),
+            "postal_code": message_data.get('content', {}).get('delivery', {}).get('location', {}).get('postal_code'),
             "name": message_data.get('content', {}).get('vendor', {}).get('name'),
             "phone": message_data.get('content', {}).get('customer', {}).get('profile', {}).get('phone'),
             "place_timestamp": formatted_timestamp,  # assuming we're using the timestamp conversion from before
-            "customer_id": message_data.get('content', {}).get('customer', {}).get('customer_id')
+            "postal_area": message_data.get('content', {}).get('delivery', {}).get('location', {}).get('postal_area'),
+            "items":,
+            "item name": message_data.get('content', {}).get('order', {}).get('items', {}).get('name'),
+            "quantity": message_data.get('content', {}).get('order', {}).get('items', {}).get('quantity'),
+            "unit_price": message_data.get('content', {}).get('order', {}).get('items', {}).get('unit_price'),
         }
 
         # Check if order has already been processed
@@ -220,7 +224,7 @@ def receive_orders(envelope):
         }), 200
 
 @functions_framework.http
-def robot_delivery_notification(request):
+def drone_delivery_notification(request):
     """Cloud Function entry point."""
     envelope = request.get_json()
     return receive_orders(envelope)
