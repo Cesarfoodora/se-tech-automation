@@ -1,0 +1,226 @@
+import base64
+import json
+import os
+import requests
+from flask import Flask, request
+import functions_framework
+from google.cloud import firestore
+from datetime import datetime
+import pytz
+import googlemaps
+
+app = Flask(__name__)
+
+# Define the Slack webhook URL as an environment variable
+webhook_url = os.getenv('SLACK_WEBHOOK_URL')
+
+# Initialize Firestore client
+db = firestore.Client(project='foodora-bi-se', database='rate-limit')
+
+def check_order_exists(order_id):
+    """
+    Check if an order has already been processed.
+    Returns True if the order exists in the processed orders list.
+    """
+    orders_ref = db.collection('starship').document('orders-sent-to-slack')
+    doc = orders_ref.get()
+
+    if not doc.exists:
+        # Initialize the document if it doesn't exist
+        orders_ref.set({'orders': []})
+        return False
+
+    orders = doc.to_dict().get('orders', [])
+    return order_id in orders
+
+def add_order_to_firestore(order_id):
+    """
+    Add an order ID to the Firestore document.
+    """
+    orders_ref = db.collection('starship').document('orders-sent-to-slack')
+
+    # Get the current document
+    doc = orders_ref.get()
+
+    if not doc.exists:
+        # If document doesn't exist, create it with the first order
+        orders_ref.set({'orders': [order_id]})
+    else:
+        # If document exists, update the orders array
+        orders_ref.update({
+            'orders': firestore.ArrayUnion([order_id])
+        })
+
+def format_slack_message(order_data):
+    """Format the Slack message with order data."""
+    return {
+        "blocks": [
+            {
+                "type": "header",
+                "text": {
+                    "type": "plain_text",
+                    "text": ":robot_face: New Robot Delivery :robot_face:"
+                }
+            },
+            {
+                "type": "section",
+                "fields": [
+                    {
+                        "type": "mrkdwn",
+                        "text": f"Order ID: *{order_data['order_id']}*\n"
+                               f"Customer ID: *{order_data['customer_id']}*\n"
+                               f"Vendor Name: *{order_data['name']}*\n"
+                               f"Latitude: *{order_data['latitude']}*\n"
+                               f"Longitude: *{order_data['longitude']}*\n"
+                               f"Phone Number: *{order_data['phone']}*\n"
+                               f"Created At: *{order_data['place_timestamp']}*"
+                    }
+                ]
+            },
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": f"<https://se.eu.logisticsbackoffice.com/dashboard/v2/hurrier/order_details/{order_data['order_id']}|Link to Hurrier>  |  "
+                           f"<https://portal.foodora.com/se/p/ops-portal-pd-orders#/order/{order_data['order_id']}|Link to Pandora Order>"
+                }
+            },
+            {
+                "type": "actions",
+                "elements": [
+                    {
+                        "type": "button",
+                        "text": {
+                            "type": "plain_text",
+                            "text": "Create Robot Delivery",
+                        },
+                        "style": "primary",
+                        "value": str(order_data['order_id']),
+                        "action_id": "create_delivery"
+                    }
+                ]
+            },
+            {
+                "type": "divider"
+            }
+        ]
+    }
+
+def send_slack_message(webhook_url, message_body):
+    """Send message to Slack."""
+    try:
+        response = requests.post(
+            webhook_url,
+            json=message_body,
+            headers={'Content-Type': 'application/json'}
+        )
+        response.raise_for_status()
+        return response
+    except requests.exceptions.RequestException as e:
+        print(f"Error sending Slack message: {e}")
+        raise
+
+def check_distance(origin, destination, max_distance=3000):
+    """
+    Checks if the average distance between origin and destination 
+    for bicycling routes is greater than max_distance.
+
+    Returns True if the distance is within the limit, False otherwise.
+    """
+    gmaps = googlemaps.Client(key="AIzaSyDLxY9rFFZGGhwXIsv5Q-aFEG0cATxGldE") 
+    directions_result = gmaps.directions(origin,
+                                         destination,
+                                         mode="bicycling",
+                                         alternatives=True)
+
+    total_distance_meters = 0
+    num_routes = len(directions_result)
+
+    for route in directions_result:
+        total_distance_meters += route['legs'][0]['distance']['value']
+
+    average_distance_meters = total_distance_meters / num_routes
+    print(average_distance_meters)
+
+    return average_distance_meters <= max_distance
+
+
+def receive_orders(envelope):
+    if not envelope or 'message' not in envelope:
+        return 'Bad Request', 400
+
+    # Decode the Pub/Sub message
+    pubsub_message = envelope['message']
+    message_data = pubsub_message.get('data')
+
+    if message_data:
+        message_data = base64.b64decode(message_data).decode('utf-8')
+        message_data = json.loads(message_data)
+        print(f"Received message: {message_data}")
+
+        # --- FILTERING LOGIC ---
+        vendor_id = message_data.get('content', {}).get('vendor', {}).get('id')
+        if vendor_id != "i3ws":
+            print(f"Ignoring message with vendor_id: {vendor_id}")
+            return '', 204
+
+        utc_timestamp = message_data['content'].get('timestamp')
+        if utc_timestamp:
+            # Convert UTC string to datetime object
+            utc_dt = datetime.fromisoformat(utc_timestamp.replace('Z', '+00:00'))
+            # Convert to CET
+            cet = pytz.timezone('Europe/Stockholm')
+            cet_dt = utc_dt.astimezone(cet)
+            # Format the datetime
+            formatted_timestamp = cet_dt.strftime('%Y-%m-%d %H:%M:%S %Z')
+        else:
+            formatted_timestamp = None
+
+        # Extract order data
+        order_data = {
+            "order_id": message_data.get('content', {}).get('order_id'),
+            "latitude": message_data.get('content', {}).get('delivery', {}).get('location', {}).get('latitude'),
+            "longitude": message_data.get('content', {}).get('delivery', {}).get('location', {}).get('longitude'),
+            "name": message_data.get('content', {}).get('vendor', {}).get('name'),
+            "phone": message_data.get('content', {}).get('customer', {}).get('profile', {}).get('phone'),
+            "place_timestamp": formatted_timestamp,  # assuming we're using the timestamp conversion from before
+            "customer_id": message_data.get('content', {}).get('customer', {}).get('customer_id')
+        }
+
+        # Check if order has already been processed
+        if check_order_exists(order_data["order_id"]):
+            print(f"Order {order_data['order_id']} has already been processed")
+            return json.dumps({
+                'status': 'skipped',
+                'message': f'Order {order_data["order_id"]} has already been processed'
+            }), 200
+
+        origin = (59.31604997376259, 18.06737658469449) 
+        destination = (order_data["latitude"], order_data["longitude"])
+
+        if not check_distance(origin, destination):  # Use the function here
+            print(f"Distance too long. Skipping Slack message.")
+            return json.dumps({
+                'status': 'skipped',
+                'message': f'Distance too long'
+            }), 200
+
+        # Format and send the Slack message
+        message_body = format_slack_message(order_data)
+        response = send_slack_message(webhook_url, message_body)
+
+        # Add order to Firestore after successful Slack message
+        if response.status_code == 200:
+            add_order_to_firestore(order_data["order_id"])
+
+        return json.dumps({
+            'status': 'success',
+            'message': f'Slack message sent for order {order_data["order_id"]}',
+            'slack_response_status': response.status_code
+        }), 200
+
+@functions_framework.http
+def robot_delivery_notification(request):
+    """Cloud Function entry point."""
+    envelope = request.get_json()
+    return receive_orders(envelope)
