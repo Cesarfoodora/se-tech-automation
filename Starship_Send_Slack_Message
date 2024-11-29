@@ -70,13 +70,13 @@ def format_slack_message(order_data):
                     {
                         "type": "mrkdwn",
                         "text": f"Order ID: *{order_data['order_id']}*\n"
-                               f"Customer ID: *{order_data['customer_id']}*\n"  # Changed to ['customer_id']
-                               f"Vendor Name: *{order_data['name']}*\n"  # Changed to ['name']
-                               f"Latitude: *{order_data['latitude']}*\n"  # Changed to ['latitude']
-                               f"Longitude: *{order_data['longitude']}*\n"  # Changed to ['longitude']
-                               f"Distance: *{order_data['pickup_to_dropoff_distance']}*\n"  # Changed to ['pickup_to_dropoff_distance']
-                               f"Phone Number: *{order_data['phone']}*\n"  # Changed to ['phone']
-                               f"Created At: *{order_data['place_timestamp']}*"  # Changed to ['place_timestamp']
+                               f"Customer ID: *{order_data['customer_id']}*\n"
+                               f"Vendor Name: *{order_data['name']}*\n"
+                               f"Latitude: *{order_data['latitude']}*\n"
+                               f"Longitude: *{order_data['longitude']}*\n"
+                               f"Phone Number: *{order_data['phone']}*\n"
+                               f"Created At: *{order_data['place_timestamp']}*"
+                               f"Total Weight: *{order_data['total_weight']} kg*"
                     }
                 ]
             },
@@ -136,24 +136,33 @@ def process_order(message_data):
             "name": message_data.get('content', {}).get('vendor', {}).get('name'),
             "phone": message_data.get('content', {}).get('customer', {}).get('profile', {}).get('phone'),
             "customer_id": message_data.get('content', {}).get('customer', {}).get('customer_id'),
-            "eligibilities": message_data.get('content', {}).get('eligibilities'),
-            "unit": message_data.get('content', {}).get('order', {}).get('order_volume', {}).get('unit'),
-            "value": message_data.get('content', {}).get('order', {}).get('order_volume', {}).get('value')
+            "items": message_data.get('content', {}).get('order', {}).get('items', [])
         }
+
+        # Extract the weight values and calculate the total weight
+        weight_values = []
+        for item in order_data['items']:
+            weight_value = item.get('weight', {}).get('value')
+            if weight_value is not None:
+                weight_values.append(weight_value)
+
+        # Calculate the total weight
+        total_weight = sum(weight_values)
+
+        print(f"total weight of items: {total_weight} kg")
+
+        # Add total_weight to order_data dictionary
+        order_data['total_weight'] = total_weight
 
         # --- FILTERING LOGIC --- 
         vendor_id = message_data.get('content', {}).get('vendor', {}).get('id')
-        distance = message_data.get('content', {}).get('pickup_to_dropoff_distance')  # Access distance directly
-        eligibilities = order_data.get('eligibilities')
-        unit = order_data.get('unit')
-        value = order_data.get('value')
 
-        if (vendor_id != "i3ws" and distance is not None and int(distance) >= 3000) or \
-           ("age_restricted" in eligibilities) or \
-           (unit == "Liters" and value > 40) or \
-           (unit == "CubicMeter" and value > 0.04) or \
-           (unit == "CubicCentimeter" and value > 40000):
-            print(f"Ignoring message with vendor_id: {vendor_id}, distance: {distance}, eligibilities: {eligibilities}, unit: {unit}, value: {value}")
+        if (vendor_id != "i3ws" and
+            distance is not None and
+            int(distance) >= 2000 and
+            total_weight > 10
+        ):
+            print(f"Ignoring message with vendor_id: {vendor_id}, distance: {distance}, total_weight: {total_weight} kg")
             return '', 204
 
         # --- TIMESTAMP CONVERSION LOGIC ---
