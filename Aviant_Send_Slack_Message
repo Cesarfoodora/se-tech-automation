@@ -8,58 +8,96 @@ from google.cloud import firestore
 from datetime import datetime
 import pytz
 import googlemaps
+from slack_sdk import WebClient
+from slack_sdk.errors import SlackApiError
 
 app = Flask(__name__)
 
 # Define the Slack webhook URL as an environment variable
 webhook_url = os.getenv('SLACK_WEBHOOK_URL')
+slack_token = os.getenv('SLACK_USER_OAUTH_TOKEN')
+slack_client = WebClient(token=slack_token)
+slack_channel = os.getenv('SLACK_CHANNEL')
+
 
 # Initialize Firestore client
 db = firestore.Client(project='foodora-bi-se', database='rate-limit')
+
+
+# Get vendor coordinates from environment variables
+j2ge_lat = float(os.getenv('J2GE_LATITUDE'))
+j2ge_lng = float(os.getenv('J2GE_LONGITUDE'))
+m6uu_lat = float(os.getenv('M6UU_LATITUDE'))
+m6uu_lng = float(os.getenv('M6UU_LONGITUDE'))
+
 
 def check_order_exists(order_id):
     """
     Check if an order has already been processed.
     Returns True if the order exists in the processed orders list.
     """
-    orders_ref = db.collection('aviant').document('aviant-orders-sent-to-slack')
+    orders_ref = db.collection('aviant').document(
+        'aviant-orders-sent-to-slack').collection('aviant-sent-slack').document(str(order_id))
     doc = orders_ref.get()
+    return doc.exists
 
-    if not doc.exists:
-        # Initialize the document if it doesn't exist
-        orders_ref.set({'orders': []})
-        return False
 
-    orders = doc.to_dict().get('orders', [])
-    return order_id in orders
-
-def add_order_to_firestore(order_id):
+def add_order_to_firestore(order_id, thread_ts):
     """
-    Add an order ID to the Firestore document.
+    Add an order ID as a new document in a subcollection along with the thread_ts.
     """
-    orders_ref = db.collection('aviant').document('aviant-orders-sent-to-slack')
+    orders_ref = db.collection('aviant').document(
+        'aviant-orders-sent-to-slack').collection('aviant-sent-slack')
 
-    # Get the current document
-    doc = orders_ref.get()
 
-    if not doc.exists:
-        # If document doesn't exist, create it with the first order
-        orders_ref.set({'orders': [order_id]})
-    else:
-        # If document exists, update the orders array
-        orders_ref.update({
-            'orders': firestore.ArrayUnion([order_id])
+    # Add a new document with the order ID as the document ID
+    orders_ref.document(str(order_id)).set({
+        'timestamp': firestore.SERVER_TIMESTAMP,
+        'thread_ts': thread_ts
+    })
+
+
+def add_vendor_ids_to_firestore():
+    """
+    Add vendor ID as document in a subcollection
+    if they don't already exist.
+    """
+    vendors_ref = db.collection('aviant').document(
+        'vendor-ids').collection('vendors')
+
+
+    # Check if "j2ge" vendor exists
+    j2ge_doc = vendors_ref.document("j2ge").get()
+    if not j2ge_doc.exists:
+        vendors_ref.document("j2ge").set({
+            'latitude': j2ge_lat,
+            'longitude': j2ge_lng
         })
+
+
+    # Check if "m6uu" vendor exists
+    m6uu_doc = vendors_ref.document("m6uu").get()
+    if not m6uu_doc.exists:
+        vendors_ref.document("m6uu").set({
+            'latitude': m6uu_lat,
+            'longitude': m6uu_lng
+        })
+
+
+# Call the function to add vendor IDs when the script starts
+add_vendor_ids_to_firestore()
+
 
 def format_slack_message(order_data):
     """Format the Slack message with order data."""
     return {
+        "text": f"New Drone Delivery: Order {order_data['order_id']}",
         "blocks": [
             {
                 "type": "header",
                 "text": {
                     "type": "plain_text",
-                    "text": ":drone: New Drone Delivery :drone:"
+                    "text": f":drone: New Drone Delivery for {order_data['vendor_id']} :drone:"
                 }
             },
             {
@@ -67,13 +105,16 @@ def format_slack_message(order_data):
                 "fields": [
                     {
                         "type": "mrkdwn",
-                        "text": f"External ID: *{order_data['order_id']}*\n"
-                               f"Street Address: *{order_data['address_text']}*\n"
-                               f"Postal Code: *{order_data['postal_code']}*\n"
-                               f"Phone Number: *{order_data['phone']}*\n"
-                               f"Customer Name: *{order_data['name']}*\n"
-                               f"Pick Up Time: *{order_data['place_timestamp']}*\n" -- order placed timestamp + static value
-                               f"Promised Delivery Time: *{order_data['promised_customer_timestamp']}*"
+                        "text": f"Order ID: *{order_data['order_id']}*\n"
+                                f"Customer ID: *{order_data['customer_id']}*\n"
+                                f"Vendor Name: *{order_data['name']}*\n"
+                                f"Address: *{order_data['address_text']}*\n"
+                                f"Postal Code: *{order_data['postal_code']}*\n"
+                                f"Latitude: *{order_data['latitude']}*\n"
+                                f"Longitude: *{order_data['longitude']}*\n"
+                                f"Total Weight: *{order_data['total_weight']} kg*\n"
+                                f"Phone Number: *{order_data['phone']}*\n"
+                                f"Created At: *{order_data['place_timestamp']}*"
                     }
                 ]
             },
@@ -81,147 +122,314 @@ def format_slack_message(order_data):
                 "type": "section",
                 "text": {
                     "type": "mrkdwn",
-                    "text": f"<https://se.eu.logisticsbackoffice.com/dashboard/v2/hurrier/order_details/{order_data['order_id']}|Link to Hurrier>  |  "
-                           f"<https://portal.foodora.com/se/p/ops-portal-pd-orders#/order/{order_data['order_id']}|Link to Pandora Order>"
+                    "text": f"<https://se.eu.logisticsbackoffice.com/dashboard/v2/hurrier/order_details/{order_data['order_id']}|Link to Hurrier>  |  "
+                            f"<https://portal.foodora.com/se/p/ops-portal-pd-orders#/order/{order_data['order_id']}|Link to Pandora Order>"
                 }
             },
             {
-                "type": "actions",
-                "elements": [
-                    {
-                        "type": "button",
-                        "text": {
-                            "type": "plain_text",
-                            "text": "Create Robot Delivery",
+                "type": "section",  # This is the section with the static_select
+                "text": {
+                    "type": "mrkdwn",  # Add a text field here
+                    "text": "Make a :vibration_mode: to our drone operator :point-here: :"
+                },
+                "accessory": {
+                    "type": "static_select",
+                    "action_id": "api_select_menu",
+                    "placeholder": {
+                        "type": "plain_text",
+                        "text": "Drone Phonebook"
+                    },
+                    "options": [
+                        {
+                            "text": {
+                                "type": "plain_text",
+                                "text": ":postbox: Create Drone Order" 
+                            },
+                            "value": "api_call_createdrone" 
                         },
-                        "style": "primary",
-                        "value": str(order_data['order_id']),
-                        "action_id": "create_delivery"
-                    }
-                ]
+                        {
+                            "text": {
+                                "type": "plain_text",
+                                "text": ":mailbox_with_mail: Get Drone Order" 
+                            },
+                            "value": "api_call_getorder" 
+                        },
+                        {
+                            "text": {
+                                "type": "plain_text",
+                                "text": ":scroll: Get List of Drone Orders" 
+                            },
+                            "value": "api_call_getallorders" 
+                        },
+                        {
+                            "text": {
+                                "type": "plain_text",
+                                "text": ":mantelpiece_clock: Get Opening Times" 
+                            },
+                            "value": "api_call_openingtimes" 
+                        }
+                    ]
+                }
             },
             {
-                "type": "divider"
+                "type": "divider"  # Divider inside the blocks array
             }
         ]
     }
 
-def send_slack_message(webhook_url, message_body):
-    """Send message to Slack."""
-    try:
-        response = requests.post(
-            webhook_url,
-            json=message_body,
-            headers={'Content-Type': 'application/json'}
-        )
-        response.raise_for_status()
-        return response
-    except requests.exceptions.RequestException as e:
-        print(f"Error sending Slack message: {e}")
-        raise
 
-def check_distance(origin, destination, max_distance=3000):
+
+
+def send_slack_message(message_body):
     """
-    Checks if the average distance between origin and destination 
-    for bicycling routes is greater than max_distance.
+    Send message to Slack using chat.postMessage API
+    Returns the full response including thread_ts
+    """
+    try:
+        # Extract the text for the header from the message blocks as fallback text
+        header_block = next(
+            (block for block in message_body.get('blocks', []) if block['type'] == 'header'),
+            None  # Default to None if no header block is found
+        )
+        header_text = header_block['text']['text'] if header_block else "New Drone Delivery" 
 
+        # Send message using chat.postMessage
+        response = slack_client.chat_postMessage(
+            channel=slack_channel,
+            blocks=message_body['blocks'],
+            text=header_text  # Add the top-level `text` argument for fallback purposes
+        )
+
+        # The response contains the timestamp of the message
+        thread_ts = response['ts']
+
+        return response, thread_ts
+
+    except SlackApiError as e:
+        print(f"Error sending Slack message: {e}")
+        raise  # Re-raise the exception to be handled elsewhere
+    except KeyError as e:  # Catch potential KeyError if the header block structure is unexpected
+        print(f"Error extracting header text: {e}")
+        raise
+    # Consider catching other specific exceptions if relevant
+
+
+def check_distance(origin, destination, max_distance=10000):
+    """
+    Checks if the aerial (straight-line) distance between origin and destination
+    is within the max_distance.
+   
     Returns True if the distance is within the limit, False otherwise.
     """
-    gmaps = googlemaps.Client(key="AIzaSyDLxY9rFFZGGhwXIsv5Q-aFEG0cATxGldE") 
-    directions_result = gmaps.directions(origin,
-                                         destination,
-                                         mode="bicycling",
-                                         alternatives=True)
 
-    total_distance_meters = 0
-    num_routes = len(directions_result)
 
-    for route in directions_result:
-        total_distance_meters += route['legs'][0]['distance']['value']
+    # Retrieve the Google Maps API key from environment variables
+    google_maps_api_key = os.getenv('GOOGLE_MAPS_API_KEY')
+   
+    if not google_maps_api_key:
+        print("Error: GOOGLE_MAPS_API_KEY environment variable is not set.")
+        return False
 
-    average_distance_meters = total_distance_meters / num_routes
-    print(average_distance_meters)
 
-    return average_distance_meters <= max_distance
+    gmaps = googlemaps.Client(key=google_maps_api_key)
+
+
+    # Get the straight-line (aerial) distance using the Google Maps Distance Matrix API
+    distance_result = gmaps.distance_matrix(origin, destination, mode="driving")
+
+
+    # Check if the result is valid
+    if distance_result["status"] == "OK":
+        straight_line_distance = distance_result["rows"][0]["elements"][0]["distance"]["value"]
+        print(f"Aerial (straight-line) distance: {straight_line_distance} meters")
+
+
+        # Check if the straight-line distance exceeds the max distance
+        if straight_line_distance > max_distance:
+            print("Aerial distance exceeds the max distance.")
+            return False
+    else:
+        print("Error retrieving distance.")
+        return False
+
+
+    # If the aerial distance is within the limit
+    print("Aerial distance is within the max distance")
+    return True
+
+
 
 
 def receive_orders(envelope):
     if not envelope or 'message' not in envelope:
         return 'Bad Request', 400
 
+
     # Decode the Pub/Sub message
     pubsub_message = envelope['message']
     message_data = pubsub_message.get('data')
 
+
     if message_data:
         message_data = base64.b64decode(message_data).decode('utf-8')
         message_data = json.loads(message_data)
-        print(f"Received message: {message_data}")
+       
+        # Log the data
+        print(f"Received data: {message_data}")
+
 
         # --- FILTERING LOGIC ---
-        vendor_id = message_data.get('content', {}).get('vendor', {}).get('id')
-        if vendor_id != "i3ws":
-            print(f"Ignoring message with vendor_id: {vendor_id}")
+        content = message_data.get('content', {})
+
+
+        # 1. Vendor ID and Delivery Provider
+        vendor_id = content.get('vendor', {}).get('id')
+        delivery_provider = content.get('delivery', {}).get('provider')
+        order_id = content.get('order_id')
+        if (vendor_id != "j2ge" and vendor_id != "m6uu") or (delivery_provider != "vendor_delivery" and delivery_provider != "platform_delivery"):
             return '', 204
 
-        utc_timestamp = message_data['content'].get('timestamp')
+
+        print(f"Received message för order: {order_id}: {message_data}")
+
+        # 2. Extract is_preorder and check if it's True
+        is_preorder = content.get('preorder')
+        if is_preorder == "True":
+            print(f"Skipping order {content.get('order_id')} because it's a preorder.")
+            return '', 204
+
+
+        # 2. Product ID Matching (Firestore Check)
+        product_ids = [
+            item.get('id') for item in content.get('order', {}).get('items', [])
+        ]
+        db = firestore.Client(project='foodora-bi-se', database='rate-limit')
+        subcollection_ref = db.collection('aviant').document(
+            'drone_menu_items').collection('products')
+
+
+        # Flag to check if any product exists in Firestore
+        found_product_in_firestore = False
+
+
+        for product_id in product_ids:
+            # Check if the product document exists
+            product_doc = subcollection_ref.document(str(product_id)).get()
+            if product_doc.exists:
+                print(f"Order {order_id} contains restricted product: {product_id}. Ignoring order.")
+                found_product_in_firestore = True
+                break  # Exit the loop if any product is found
+
+
+        # If any product was found, exit the Cloud Function
+        if found_product_in_firestore:
+            return '', 204
+
+
+        # 3. Total Weight Check
+        weight_values = [
+            item.get('weight', {}).get('value')
+            for item in content.get('order', {}).get('items', [])
+            if item.get('weight', {}).get('value') is not None
+        ]
+        total_weight = round(sum(weight_values), 2)
+        if total_weight > 3:
+            print(f"Ignoring order {order_id} with total_weight: {total_weight} kg")
+            return '', 204
+
+
+        # 4. Check if Order Already Processed
+        if check_order_exists(order_id):
+            print(f"Order {order_id} has already been processed.")
+            return json.dumps({
+                'status': 'skipped',
+                'message': f'Order {order_id} has already been processed'
+            }), 200
+
+
+        # 5. Distance Check - Updated with vendor-specific origin
+        latitude = message_data.get('content', {}).get(
+            'delivery', {}).get('location', {}).get('latitude')
+        longitude = message_data.get('content', {}).get(
+            'delivery', {}).get('location', {}).get('longitude')
+
+
+        if vendor_id == "j2ge":
+            origin = (j2ge_lat, j2ge_lng)
+        elif vendor_id == "m6uu":
+            origin = (m6uu_lat, m6uu_lng)
+        else:  # Handle cases with unknown vendor_id
+            print(f"Unknown vendor ID: {vendor_id}. Skipping distance check.")
+            origin = None
+
+
+        if origin and not check_distance(origin, (latitude, longitude)):
+            print(f"Distance too long. Skipping Slack message.")
+            return json.dumps({
+                'status': 'skipped',
+                'message': 'Distance too long'
+            }), 200
+
+
+        # --- END OF FILTERING LOGIC ---
+
+
+        # Extract timestamp and convert to CET
+        utc_timestamp = content.get('timestamp')
         if utc_timestamp:
-            # Convert UTC string to datetime object
             utc_dt = datetime.fromisoformat(utc_timestamp.replace('Z', '+00:00'))
-            # Convert to CET
             cet = pytz.timezone('Europe/Stockholm')
             cet_dt = utc_dt.astimezone(cet)
-            # Format the datetime
             formatted_timestamp = cet_dt.strftime('%Y-%m-%d %H:%M:%S %Z')
         else:
             formatted_timestamp = None
 
-        # Extract order data
+
+        # Extract and format order data
         order_data = {
-            "order_id": message_data.get('content', {}).get('order_id'),
-            "address_text": message_data.get('content', {}).get('delivery', {}).get('location', {}).get('address_text'),
-            "postal_code": message_data.get('content', {}).get('delivery', {}).get('location', {}).get('postal_code'),
-            "name": message_data.get('content', {}).get('vendor', {}).get('name'),
-            "phone": message_data.get('content', {}).get('customer', {}).get('profile', {}).get('phone'),
-            "place_timestamp": formatted_timestamp,  # assuming we're using the timestamp conversion from before
-            "postal_area": message_data.get('content', {}).get('delivery', {}).get('location', {}).get('postal_area'),
-            "items":,
-            "item name": message_data.get('content', {}).get('order', {}).get('items', {}).get('name'),
-            "quantity": message_data.get('content', {}).get('order', {}).get('items', {}).get('quantity'),
-            "unit_price": message_data.get('content', {}).get('order', {}).get('items', {}).get('unit_price'),
+            "vendor_id": content.get('vendor', {}).get('id'),
+            "order_id": order_id,
+            "latitude": latitude,
+            "longitude": longitude,
+            "address_text": content.get('delivery', {}).get('location', {}).get('address_text'),
+            "postal_code": content.get('delivery', {}).get('location', {}).get('postal_code'),
+            "name": content.get('vendor', {}).get('name'),
+            "phone": content.get('customer', {}).get('profile', {}).get('phone'),
+            "place_timestamp": formatted_timestamp,
+            "customer_id": content.get('customer', {}).get('customer_id'),
+            "items": content.get('order', {}).get('items', []),
+            "product_ids": product_ids,
+            "total_weight": total_weight
         }
 
-        # Check if order has already been processed
-        if check_order_exists(order_data["order_id"]):
-            print(f"Order {order_data['order_id']} has already been processed")
-            return json.dumps({
-                'status': 'skipped',
-                'message': f'Order {order_data["order_id"]} has already been processed'
-            }), 200
-
-        origin = (59.31604997376259, 18.06737658469449) 
-        destination = (order_data["latitude"], order_data["longitude"])
-
-        if not check_distance(origin, destination):  # Use the function here
-            print(f"Distance too long. Skipping Slack message.")
-            return json.dumps({
-                'status': 'skipped',
-                'message': f'Distance too long'
-            }), 200
 
         # Format and send the Slack message
         message_body = format_slack_message(order_data)
-        response = send_slack_message(webhook_url, message_body)
+        try:
+            print(f"Sending Slack message for order {order_id}")
+            response, thread_ts = send_slack_message(message_body)
+            print(f"Slack message sent successfully for order {order_id} with thread_ts: {thread_ts}")
+            print(json.dumps(message_body, indent=4))
 
-        # Add order to Firestore after successful Slack message
-        if response.status_code == 200:
-            add_order_to_firestore(order_data["order_id"])
+            # Add order to Firestore after successful Slack message
+            if response['ok']:
+                add_order_to_firestore(order_id, thread_ts)
 
-        return json.dumps({
-            'status': 'success',
-            'message': f'Slack message sent for order {order_data["order_id"]}',
-            'slack_response_status': response.status_code
-        }), 200
+
+            print(f"Order {order_id} processed and Slack message sent successfully.")
+            return json.dumps({
+                'status': 'success',
+                'message': f'Order {order_id} processed and Slack message sent successfully.'
+            }), 200      
+
+
+        except SlackApiError as e:
+            print(f"Slack API Error: {e.response['error']}")
+            return json.dumps({
+                'status': 'error',
+                'message': f'Slack API Error: {e.response["error"]}'
+            }), 500
+
 
 @functions_framework.http
 def drone_delivery_notification(request):
